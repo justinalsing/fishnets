@@ -75,7 +75,7 @@ class Fishnet(tf.Module):
             return loss, gradients
         
         # run the optimizer
-        resuls = tfp.optimizer.lbfgs_minimize(value_and_gradients_function=value_and_gradient,
+        results = tfp.optimizer.lbfgs_minimize(value_and_gradients_function=value_and_gradient,
                                               initial_position=initial_parameters,
                                               max_iterations=max_iterations,
                                               tolerance=tolerance)
@@ -295,7 +295,7 @@ class FishnetTwin(tf.Module):
             return loss, gradients
         
         # run the optimizer
-        resuls = tfp.optimizer.lbfgs_minimize(value_and_gradients_function=value_and_gradient,
+        results = tfp.optimizer.lbfgs_minimize(value_and_gradients_function=value_and_gradient,
                                               initial_position=initial_parameters,
                                               max_iterations=max_iterations,
                                               tolerance=tolerance)
