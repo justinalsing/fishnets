@@ -352,7 +352,7 @@ class FishnetTwin(tf.Module):
             mle = np.zeros((inputs.shape[0], self.n_parameters))
             F = np.zeros((inputs.shape[0], self.n_parameters, self.n_parameters))
             for i in trange(len(idx)):
-                mle_, F_ = self.compute_mle(data.numpy()[idx[i],...], score_mask.numpy()[idx[i],...], fisher_mask.numpy()[idx[i],...] )
+                mle_, F_ = self.compute_mle(inputs.numpy()[idx[i],...], score_mask.numpy()[idx[i],...], fisher_mask.numpy()[idx[i],...] )
                 mle[idx[i],:] = mle_.numpy()
                 F[idx[i],...] = F_.numpy()
             mle = tf.convert_to_tensor(mle)
