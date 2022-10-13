@@ -388,19 +388,38 @@ class FishnetTwin(tf.Module):
     
         return -tf.reduce_mean(-0.5 * tf.einsum('ij,ij->i', (parameters - mle), tf.einsum('ijk, ik -> ij', F, (parameters - mle))) + 0.5*tf.linalg.logdet(F))
 
+    # mse loss
+    @tf.function
+    def mse_loss(self, inputs, parameters, score_mask, fisher_mask):
+
+        mle, F = self.compute_mle(inputs, score_mask, fisher_mask)
+
+        return tf.reduce_sum(tf.reduce_mean(tf.square(tf.subtract(mle, parameters)), axis=0))
+
     # basic loss and gradients function
     @tf.function
-    def loss_and_gradients(self, inputs, parameters, score_mask, fisher_mask):
+    def loss_and_gradients_kl(self, inputs, parameters, score_mask, fisher_mask):
         
         with tf.GradientTape() as tape:
             tape.watch(self.trainable_variables)
-            loss = self.kl_loss(inputs, parameters, score_mask, fisher_mask)
+                loss = self.kl_loss(inputs, parameters, score_mask, fisher_mask)
+        gradients = tape.gradient(loss, self.trainable_variables)
+        
+        return loss, gradients
+
+    # basic loss and gradients function
+    @tf.function
+    def loss_and_gradients_mse(self, inputs, parameters, score_mask, fisher_mask):
+        
+        with tf.GradientTape() as tape:
+            tape.watch(self.trainable_variables)
+                loss = self.mse_loss(inputs, parameters, score_mask, fisher_mask)
         gradients = tape.gradient(loss, self.trainable_variables)
         
         return loss, gradients
         
-    
-    def compute_loss_and_gradients(self, inputs, parameters, score_mask, fisher_mask):
+    # loss and gradients: accumulated in minibatches if neccessary (to avoid memory issues)
+    def compute_loss_and_gradients(self, inputs, parameters, score_mask, fisher_mask, lossfn='kl'):
         
         # total number of network calls
         ncalls = inputs.shape[0] * inputs.shape[1]
@@ -420,9 +439,13 @@ class FishnetTwin(tf.Module):
 
             # loop over sub-batches
             for inputs_, parameters_, score_mask_, fisher_mask_ in dataset:
-
+                
                 # calculate loss and gradients
-                loss, gradients = self.loss_and_gradients(inputs_, parameters_, score_mask_, fisher_mask_)
+                if lossfn == 'kl':
+                    loss, gradients = self.loss_and_gradients_kl(inputs_, parameters_, score_mask_, fisher_mask_)
+                else:
+                    loss, gradients = self.loss_and_gradients_mse(inputs_, parameters_, score_mask_, fisher_mask_)
+
 
                 # update the accumulated gradients and loss
                 for i in range(len(accumulated_gradients)):
@@ -430,22 +453,30 @@ class FishnetTwin(tf.Module):
                 accumulated_loss.assign_add(loss*inputs_.shape[0]/inputs.shape[0])
 
         else:
-            loss, gradients = self.loss_and_gradients(inputs, parameters, score_mask, fisher_mask)
+            # calculate loss and gradients
+            if lossfn == 'kl':
+                accumulated_loss, accumulated_gradients = self.loss_and_gradients_kl(inputs, parameters, score_mask, fisher_mask)
+            else:
+                accumulated_loss, accumulated_gradients = self.loss_and_gradients_mse(inputs, parameters, score_mask, fisher_mask)
 
-        return loss, gradients
+
+        return accumulated_loss, accumulated_gradients
     
-    def train(self, training_data, epochs=1000, lr=None, batch_size=512):
+    def train(self, training_data, epochs=1000, lr=None, batch_size=512, lossfn='kl'):
         
+        # set the learning rate if desired
         if lr is not None:
             self.optimizer.lr = lr
 
+        # save the loss
         losses = []
             
+        # main training loop
         dataset = tf.data.Dataset.from_tensor_slices(training_data)
         with trange(epochs) as progress:
             for epoch in progress:
                 for inputs_, parameters_, score_mask_, fisher_mask_ in dataset.shuffle(buffer_size=len(dataset)).batch(batch_size):
-                    loss, gradients = self.compute_loss_and_gradients(inputs_, parameters_, score_mask_, fisher_mask_)
+                    loss, gradients = self.compute_loss_and_gradients(inputs_, parameters_, score_mask_, fisher_mask_, lossfn=lossfn)
                     self.optimizer.apply_gradients(zip(gradients, self.trainable_variables))
                     losses.append(loss.numpy())
                     progress.set_postfix({'loss':losses[-1]})
@@ -681,19 +712,38 @@ class FishnetTwinParametric(tf.Module):
     
         return -tf.reduce_mean(-0.5 * tf.einsum('ij,ij->i', (parameters - mle), tf.einsum('ijk, ik -> ij', F, (parameters - mle))) + 0.5*tf.linalg.logdet(F))
 
+    # mse loss
+    @tf.function
+    def mse_loss(self, inputs, parameters, score_mask, fisher_mask):
+
+        mle, F = self.compute_mle(inputs, score_mask, fisher_mask)
+
+        return tf.reduce_sum(tf.reduce_mean(tf.square(tf.subtract(mle, parameters)), axis=0))
+
     # basic loss and gradients function
     @tf.function
-    def loss_and_gradients(self, inputs, parameters, score_mask, fisher_mask):
+    def loss_and_gradients_kl(self, inputs, parameters, score_mask, fisher_mask):
         
         with tf.GradientTape() as tape:
             tape.watch(self.trainable_variables)
-            loss = self.kl_loss(inputs, parameters, score_mask, fisher_mask)
+                loss = self.kl_loss(inputs, parameters, score_mask, fisher_mask)
+        gradients = tape.gradient(loss, self.trainable_variables)
+        
+        return loss, gradients
+
+    # basic loss and gradients function
+    @tf.function
+    def loss_and_gradients_mse(self, inputs, parameters, score_mask, fisher_mask):
+        
+        with tf.GradientTape() as tape:
+            tape.watch(self.trainable_variables)
+                loss = self.mse_loss(inputs, parameters, score_mask, fisher_mask)
         gradients = tape.gradient(loss, self.trainable_variables)
         
         return loss, gradients
         
     # loss and gradients: accumulated in minibatches if neccessary (to avoid memory issues)
-    def compute_loss_and_gradients(self, inputs, parameters, score_mask, fisher_mask):
+    def compute_loss_and_gradients(self, inputs, parameters, score_mask, fisher_mask, lossfn='kl'):
         
         # total number of network calls
         ncalls = inputs.shape[0] * inputs.shape[1]
@@ -713,9 +763,13 @@ class FishnetTwinParametric(tf.Module):
 
             # loop over sub-batches
             for inputs_, parameters_, score_mask_, fisher_mask_ in dataset:
-
+                
                 # calculate loss and gradients
-                loss, gradients = self.loss_and_gradients(inputs_, parameters_, score_mask_, fisher_mask_)
+                if lossfn == 'kl':
+                    loss, gradients = self.loss_and_gradients_kl(inputs_, parameters_, score_mask_, fisher_mask_)
+                else:
+                    loss, gradients = self.loss_and_gradients_mse(inputs_, parameters_, score_mask_, fisher_mask_)
+
 
                 # update the accumulated gradients and loss
                 for i in range(len(accumulated_gradients)):
@@ -723,11 +777,16 @@ class FishnetTwinParametric(tf.Module):
                 accumulated_loss.assign_add(loss*inputs_.shape[0]/inputs.shape[0])
 
         else:
-            loss, gradients = self.loss_and_gradients(inputs, parameters, score_mask, fisher_mask)
+            # calculate loss and gradients
+            if lossfn == 'kl':
+                accumulated_loss, accumulated_gradients = self.loss_and_gradients_kl(inputs, parameters, score_mask, fisher_mask)
+            else:
+                accumulated_loss, accumulated_gradients = self.loss_and_gradients_mse(inputs, parameters, score_mask, fisher_mask)
 
-        return loss, gradients
+
+        return accumulated_loss, accumulated_gradients
     
-    def train(self, training_data, epochs=1000, lr=None, batch_size=512):
+    def train(self, training_data, epochs=1000, lr=None, batch_size=512, lossfn='kl'):
         
         # set the learning rate if desired
         if lr is not None:
@@ -741,7 +800,7 @@ class FishnetTwinParametric(tf.Module):
         with trange(epochs) as progress:
             for epoch in progress:
                 for inputs_, parameters_, score_mask_, fisher_mask_ in dataset.shuffle(buffer_size=len(dataset)).batch(batch_size):
-                    loss, gradients = self.compute_loss_and_gradients(inputs_, parameters_, score_mask_, fisher_mask_)
+                    loss, gradients = self.compute_loss_and_gradients(inputs_, parameters_, score_mask_, fisher_mask_, lossfn=lossfn)
                     self.optimizer.apply_gradients(zip(gradients, self.trainable_variables))
                     losses.append(loss.numpy())
                     progress.set_postfix({'loss':losses[-1]})
