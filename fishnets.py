@@ -459,7 +459,7 @@ class FishnetTwin(tf.Module):
 # fishnet class (seperate network models for both score and fisher)
 class FishnetTwinParametric(tf.Module):
     
-    def __init__(self, n_parameters=2, n_inputs=3, n_hidden_score=[128, 128], n_hidden_fisher=[128, 128], priormu=None, priorCinv=None, theta_fid=None, optimizer=tf.keras.optimizers.Adam(lr=1e-4), maxcall=1e5, sigma_init=None, restore=False, restore_filename=None):
+    def __init__(self, n_parameters=2, n_inputs=3, n_hidden_score=[128, 128], n_hidden_fisher=[128, 128], priormu=None, priorCinv=None, theta_fid=None, optimizer=tf.keras.optimizers.Adam(lr=1e-4), maxcall=1e5, sigma_init=1e-3, restore=False, restore_filename=None):
         
         # restore?
         if restore:
