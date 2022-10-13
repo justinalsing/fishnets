@@ -750,4 +750,3 @@ class FishnetTwinParametric(tf.Module):
     def save(self, filename):
 
         pickle.dump([self.n_parameters, self.n_inputs, self.maxcall, self.n_hidden_score, self.n_hidden_fisher, self.sigma_init, self.priormu, self.priorCinv, self.theta_fid] + [tuple(variable.numpy() for variable in self.trainable_variables)], open(filename, 'wb'))
-
