@@ -402,7 +402,7 @@ class FishnetTwin(tf.Module):
         
         with tf.GradientTape() as tape:
             tape.watch(self.trainable_variables)
-                loss = self.kl_loss(inputs, parameters, score_mask, fisher_mask)
+            loss = self.kl_loss(inputs, parameters, score_mask, fisher_mask)
         gradients = tape.gradient(loss, self.trainable_variables)
         
         return loss, gradients
@@ -413,7 +413,7 @@ class FishnetTwin(tf.Module):
         
         with tf.GradientTape() as tape:
             tape.watch(self.trainable_variables)
-                loss = self.mse_loss(inputs, parameters, score_mask, fisher_mask)
+            loss = self.mse_loss(inputs, parameters, score_mask, fisher_mask)
         gradients = tape.gradient(loss, self.trainable_variables)
         
         return loss, gradients
@@ -726,7 +726,7 @@ class FishnetTwinParametric(tf.Module):
         
         with tf.GradientTape() as tape:
             tape.watch(self.trainable_variables)
-                loss = self.kl_loss(inputs, parameters, score_mask, fisher_mask)
+            loss = self.kl_loss(inputs, parameters, score_mask, fisher_mask)
         gradients = tape.gradient(loss, self.trainable_variables)
         
         return loss, gradients
@@ -737,7 +737,7 @@ class FishnetTwinParametric(tf.Module):
         
         with tf.GradientTape() as tape:
             tape.watch(self.trainable_variables)
-                loss = self.mse_loss(inputs, parameters, score_mask, fisher_mask)
+            loss = self.mse_loss(inputs, parameters, score_mask, fisher_mask)
         gradients = tape.gradient(loss, self.trainable_variables)
         
         return loss, gradients
