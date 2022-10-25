@@ -1,0 +1,13 @@
+{
+    "n_sims": 10000,
+    "n_data_train": 100,
+    "theta_fid": [0, 0],
+    "datapath": "/data80/makinen/fishnets/",
+    "n_parameters": 3,
+    "n_hidden_fisher": [64, 64],
+    "n_hidden_score": [64, 64]
+
+
+
+
+}
