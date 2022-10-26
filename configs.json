@@ -5,7 +5,8 @@
     "datapath": "/data80/makinen/fishnets/",
     "n_parameters": 3,
     "n_hidden_fisher": [64, 64],
-    "n_hidden_score": [64, 64]
+    "n_hidden_score": [64, 64],
+    "model_outdir": "/data80/makinen/fishnets/results/"
 
 
 

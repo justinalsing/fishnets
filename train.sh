@@ -1,11 +1,17 @@
 
-#!/bin/bash
-#SBATCH --account=rrg-lplevass
-#SBATCH --gres=gpu:1       # Request GPU "generic resources"
-#SBATCH --cpus-per-task=6  # Cores proportional to GPUs: 6 on Cedar, 10 on Béluga, 16 on Graham.
-#SBATCH --mem=64G       # Memory proportional to GPUs: 32000 Cedar, 47000 Béluga, 64000 Graham.
-#SBATCH --time=0-010:00     # DD-HH:MM:SS
+ #PBS -S /bin/bash
+ #PBS -N fishnets
+ #PBS -j oe
+ #PBS -o fishnets.log
+ #PBS -l nodes=1:has1gpu:ppn=8,walltime=12:00:00
+
+module load tensorflow/2.8 
+XLA_FLAGS=--xla_gpu_cuda_data_dir=\${CUDA_PATH}
+export XLA_FLAGS
 
 source /home/makinen/venvs/imnndev/bin/activate
 
-python main.py --runner AnnealRunner --config quijote.yml --doc quijote
+cd /home/makinen/repositories/fishnets/
+
+
+python large_data.py big_model 
