@@ -220,6 +220,7 @@ class FishnetTwin(tf.Module):
         # restore?
         if restore:
             self.n_parameters, self.n_inputs, self.maxcall, self.n_hidden_score, self.n_hidden_fisher, self.activation_score, self.activation_fisher, self.priormu, self.priorCinv, self.theta_fid, loaded_trainable_variables = pickle.load(open(restore_filename, 'rb'))
+            self.optimizer = optimizer
         else:
             # parameters
             self.n_parameters = n_parameters
@@ -498,6 +499,7 @@ class FishnetTwinParametric(tf.Module):
             
             # std dev of the weight initialization
             self.sigma_init = np.sqrt(2./self.n_inputs) if sigma_init is None else sigma_init
+            self.optimizer = optimizer
 
         else:
             # parameters
