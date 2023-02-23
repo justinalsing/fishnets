@@ -4,6 +4,8 @@ import tensorflow as tf
 import tensorflow_probability as tfp
 from tqdm import trange
 tfk = tf.keras
+tfd = tfp.distributions
+tfb = tfp.bijectors
 
 # fishnet class (single network model for both score and fisher)
 class Fishnet(tf.Module):
@@ -219,6 +221,7 @@ class FishnetTwin(tf.Module):
         
         # restore?
         if restore:
+            print("loading model")
             self.n_parameters, self.n_inputs, self.maxcall, self.n_hidden_score, self.n_hidden_fisher, self.activation_score, self.activation_fisher, self.priormu, self.priorCinv, self.theta_fid, loaded_trainable_variables = pickle.load(open(restore_filename, 'rb'))
             self.optimizer = optimizer
         else:
@@ -256,6 +259,333 @@ class FishnetTwin(tf.Module):
         # fisher model
         self.model_fisher = tfk.Sequential([tfk.layers.Dense(self.architecture_fisher[i+1], activation=self.activation_fisher[i]) for i in range(self.n_layers_fisher)])
         _ = self.model_fisher(tf.ones((1, 1, n_inputs)))
+
+        # restore trainable variables?
+        if restore:
+            print("restoring variables")
+            for model_variable, loaded_variable in zip(self.trainable_variables, loaded_trainable_variables):
+                model_variable.assign(loaded_variable)
+
+        # set up for l-bfgs optimizer...
+        
+        # trainable variables shapes
+        self.trainable_variable_shapes = tf.shape_n(self.trainable_variables)
+        
+        # prepare stich and partition indices for dynamic stitching and partitioning
+        count = 0
+        stitch_idx = [] # stitch indices
+        partition_idx = [] # partition indices
+
+        for i, shape in enumerate(self.trainable_variable_shapes):
+            n = np.product(shape)
+            stitch_idx.append(tf.reshape(tf.range(count, count+n, dtype=tf.int32), shape))
+            partition_idx.extend([i]*n)
+            count += n
+
+        self.partition_idx = tf.constant(partition_idx)
+        self.stitch_idx = stitch_idx
+        
+    # for l-bfgs optimizer: assign model parameters from a 1d tensor
+    @tf.function
+    def assign_new_model_parameters(self, parameters_1d):
+
+        parameters = tf.dynamic_partition(parameters_1d, self.partition_idx, len(self.trainable_variable_shapes))
+        for i, (shape, param) in enumerate(zip(self.trainable_variable_shapes, parameters)):
+            self.trainable_variables[i].assign(tf.reshape(param, shape))
+            
+    # run lbfgs optimizer
+    def lbfgs_optimize(self, inputs, parameters, score_mask, fisher_mask, max_iterations=500, tolerance=1e-5, verbose=True):
+        
+        # initial parameters
+        initial_parameters = tf.dynamic_stitch(self.stitch_idx, self.trainable_variables)
+        
+        # value and gradients function, as required by l-bfgs
+        def value_and_gradient(x):
+            
+            # set the updated network parameters
+            self.assign_new_model_parameters(x)
+            
+            # compute loss and gradients (using gradient accumulation if needed)
+            loss, gradients = self.compute_loss_and_gradients(inputs, parameters, score_mask, fisher_mask)
+            gradients = tf.dynamic_stitch(self.stitch_idx, gradients) # stitch the gradients together into 1d, as needed by l-bfgs
+            
+            # print the loss if desired
+            if verbose:
+                print(loss.numpy())
+            
+            return loss, gradients
+        
+        # run the optimizer
+        results = tfp.optimizer.lbfgs_minimize(value_and_gradients_function=value_and_gradient,
+                                              initial_position=initial_parameters,
+                                              max_iterations=max_iterations,
+                                              tolerance=tolerance)
+        
+        return results
+        
+    # compute score and fisher outputs from the network model
+    @tf.function
+    def call(self, inputs):
+        
+        score = self.model_score(inputs)
+        fisher_cholesky = self.model_fisher(inputs)
+        
+        return score, self.construct_fisher_matrix(fisher_cholesky)
+    
+    # construct the Fisher matrix from the network outputs (ie., the elements of the cholseky factor)
+    @tf.function
+    def construct_fisher_matrix(self, outputs):
+        
+        Q = tfp.math.fill_triangular(outputs)
+        # EDIT: changed to + softplus(diag_part(Q))
+        L = Q - tf.linalg.diag(tf.linalg.diag_part(Q) + tf.math.softplus(tf.linalg.diag_part(Q)))
+        return tf.einsum('...ij,...jk->...ik', L, tf.transpose(L, perm=[0, 1, 3, 2]))
+
+    
+    # construct the MLE
+    @tf.function
+    def compute_mle(self, inputs, score_mask, fisher_mask):
+        
+        # score and fisher (per data point)
+        score, fisher = self.call(inputs)
+        
+        # sum the per-data point scores and Fishers, and include Gaussian prior correction
+        t = tf.reduce_sum(score*score_mask, axis=1) - tf.einsum('ij,j->i', self.priorCinv, (self.theta_fid - self.priormu))
+        F = tf.reduce_sum(fisher*fisher_mask, axis=1) + self.priorCinv
+        
+        # construct MLE
+        mle = self.theta_fid + tf.einsum('ijk,ik->ij', tf.linalg.inv(F), t)
+    
+        return mle, F
+    
+    # automatically break up the calculation if massive batches are called (to avoid memory issues)
+    def compute_mle_(self, inputs, score_mask, fisher_mask):
+        
+        # total number of network calls
+        ncalls = inputs.shape[0] * inputs.shape[1]
+        
+        # do we need to split the call into batches or not?
+        if ncalls > self.maxcall:
+            
+            # batch up the inputs
+            batch_size = (self.maxcall // inputs.shape[1])
+            idx = [np.arange(i*batch_size, min((i+1)*batch_size, inputs.shape[0])) for i in range(inputs.shape[0] // batch_size + int(inputs.shape[0] % batch_size > 0))]
+            
+            # compute the MLE and fisher over batches
+            mle = np.zeros((inputs.shape[0], self.n_parameters))
+            F = np.zeros((inputs.shape[0], self.n_parameters, self.n_parameters))
+            for i in trange(len(idx)):
+                mle_, F_ = self.compute_mle(inputs.numpy()[idx[i],...], score_mask.numpy()[idx[i],...], fisher_mask.numpy()[idx[i],...] )
+                mle[idx[i],:] = mle_.numpy()
+                F[idx[i],...] = F_.numpy()
+            mle = tf.convert_to_tensor(mle)
+            F = tf.convert_to_tensor(F)
+        else:
+        
+            # compute MLE and fisher
+            mle, F = self.compute_mle(inputs, score_mask, fisher_mask)
+    
+        return mle, F  
+
+    # KL divergence loss
+    @tf.function
+    def kl_loss(self, inputs, parameters, score_mask, fisher_mask):
+        
+        mle, F = self.compute_mle(inputs, score_mask, fisher_mask)
+    
+        return -tf.reduce_mean(-0.5 * tf.einsum('ij,ij->i', (parameters - mle), tf.einsum('ijk, ik -> ij', F, (parameters - mle))) + 0.5*tf.linalg.logdet(F))
+
+    # mse loss
+    @tf.function
+    def mse_loss(self, inputs, parameters, score_mask, fisher_mask):
+
+        mle, F = self.compute_mle(inputs, score_mask, fisher_mask)
+
+        return tf.reduce_sum(tf.reduce_mean(tf.square(tf.subtract(mle, parameters)), axis=0))
+
+    
+    # deepsets mse loss
+    @tf.function
+    def deepsets_mse(self, inputs, parameters, score_mask, fisher_mask):
+
+        score, fisher = self.call(inputs)
+        # sum the per-data point scores and Fishers, and include Gaussian prior correction
+        mle = tf.reduce_sum(score*score_mask, axis=1) # - tf.einsum('ij,j->i', self.priorCinv, (self.theta_fid - self.priormu))
+
+        return tf.reduce_sum(tf.reduce_mean(tf.square(tf.subtract(mle, parameters)), axis=0))
+
+    # basic loss and gradients function
+    @tf.function
+    def loss_and_gradients_kl(self, inputs, parameters, score_mask, fisher_mask):
+        
+        with tf.GradientTape() as tape:
+            tape.watch(self.trainable_variables)
+            loss = self.kl_loss(inputs, parameters, score_mask, fisher_mask)
+        gradients = tape.gradient(loss, self.trainable_variables)
+        
+        return loss, gradients
+
+    # basic loss and gradients function
+    @tf.function
+    def loss_and_gradients_mse(self, inputs, parameters, score_mask, fisher_mask):
+        
+        with tf.GradientTape() as tape:
+            tape.watch(self.trainable_variables)
+            loss = self.mse_loss(inputs, parameters, score_mask, fisher_mask)
+        gradients = tape.gradient(loss, self.trainable_variables)
+        
+        return loss, gradients
+        
+    # loss for deepsets
+    @tf.function
+    def loss_and_gradients_deepsets(self, inputs, parameters, score_mask, fisher_mask):
+        
+        with tf.GradientTape() as tape:
+            tape.watch(self.trainable_variables)
+            loss = self.deepsets_mse(inputs, parameters, score_mask, fisher_mask)
+        gradients = tape.gradient(loss, self.trainable_variables)
+        
+        return loss, gradients
+
+    # loss and gradients: accumulated in minibatches if neccessary (to avoid memory issues)
+    def compute_loss_and_gradients(self, inputs, parameters, score_mask, fisher_mask, lossfn='kl'):
+        
+        # total number of network calls
+        ncalls = inputs.shape[0] * inputs.shape[1]
+        
+        # accumulate gradients or not?
+        if ncalls > self.maxcall:
+            
+            # how many batches do we need to split it into?
+            batch_size = (self.maxcall // inputs.shape[1])
+            
+            # create dataset to do sub-calculations over
+            dataset = tf.data.Dataset.from_tensor_slices((inputs, parameters, score_mask, fisher_mask)).batch(batch_size)
+
+            # initialize gradients and loss (to zero)
+            accumulated_gradients = [tf.Variable(tf.zeros_like(variable), trainable=False) for variable in self.trainable_variables]
+            accumulated_loss = tf.Variable(0., trainable=False)
+
+            # loop over sub-batches
+            for inputs_, parameters_, score_mask_, fisher_mask_ in dataset:
+                
+                # calculate loss and gradients
+                if lossfn == 'kl':
+                    loss, gradients = self.loss_and_gradients_kl(inputs_, parameters_, score_mask_, fisher_mask_)
+                elif lossfn == 'deepsets':
+                    loss, gradients = self.loss_and_gradients_deepsets(inputs_, parameters_, score_mask_, fisher_mask_)
+                else:
+                    loss, gradients = self.loss_and_gradients_mse(inputs_, parameters_, score_mask_, fisher_mask_)
+
+
+                # update the accumulated gradients and loss
+                for i in range(len(accumulated_gradients)):
+                    accumulated_gradients[i].assign_add(gradients[i]*inputs_.shape[0]/inputs.shape[0])
+                accumulated_loss.assign_add(loss*inputs_.shape[0]/inputs.shape[0])
+
+        else:
+            # calculate loss and gradients
+            if lossfn == 'kl':
+                accumulated_loss, accumulated_gradients = self.loss_and_gradients_kl(inputs, parameters, score_mask, fisher_mask)
+            elif lossfn == 'deepsets':
+                accumulated_loss, accumulated_gradients = self.loss_and_gradients_deepsets(inputs, parameters, score_mask, fisher_mask)
+            else:
+                accumulated_loss, accumulated_gradients = self.loss_and_gradients_mse(inputs, parameters, score_mask, fisher_mask)
+
+
+        return accumulated_loss, accumulated_gradients
+    
+    def train(self, training_data, epochs=1000, lr=None, batch_size=512, lossfn='kl'):
+        
+        # set the learning rate if desired
+        if lr is not None:
+            self.optimizer.lr = lr
+
+        # save the loss
+        losses = []
+            
+        # main training loop
+        dataset = tf.data.Dataset.from_tensor_slices(training_data)
+        with trange(epochs) as progress:
+            for epoch in progress:
+                for inputs_, parameters_, score_mask_, fisher_mask_ in dataset.shuffle(buffer_size=len(dataset)).batch(batch_size):
+                    loss, gradients = self.compute_loss_and_gradients(inputs_, parameters_, score_mask_, fisher_mask_, lossfn=lossfn)
+                    self.optimizer.apply_gradients(zip(gradients, self.trainable_variables))
+                    losses.append(loss.numpy())
+                    progress.set_postfix({'loss':losses[-1]})
+        return losses
+
+    def save(self, filename):
+
+        pickle.dump([self.n_parameters, self.n_inputs, self.maxcall, self.n_hidden_score, self.n_hidden_fisher, self.activation_score, self.activation_fisher, self.priormu, self.priorCinv, self.theta_fid] + [tuple(variable.numpy() for variable in self.trainable_variables)], open(filename, 'wb'))
+
+# fishnettwin BETA class
+
+
+
+# fishnet class (seperate network models for both score and fisher)
+class FishnetTwinNormFlow(tf.Module):
+    
+    def __init__(self, n_parameters=2, n_inputs=3, n_hidden_score=[128, 128], 
+                        activation_score=[tf.nn.leaky_relu, tf.nn.leaky_relu], 
+                        n_hidden_fisher=[128, 128], 
+                        activation_fisher=[tf.nn.leaky_relu, tf.nn.leaky_relu], 
+                        n_hidden_normflow=[128,128],
+                        activation_normflow=[tf.nn.leaky_relu, tf.nn.leaky_relu],
+                        priormu=None, priorCinv=None, theta_fid=None, optimizer=tf.keras.optimizers.Adam(lr=1e-4), maxcall=1e5, restore=False, restore_filename=None):
+        
+        # restore?
+        if restore:
+            self.n_parameters, self.n_inputs, self.maxcall, self.n_hidden_score, self.n_hidden_fisher, self.activation_score, self.activation_fisher, self.priormu, self.priorCinv, self.theta_fid, loaded_trainable_variables = pickle.load(open(restore_filename, 'rb'))
+            self.optimizer = optimizer
+        else:
+            # parameters
+            self.n_parameters = n_parameters
+            self.n_inputs = n_inputs
+            self.maxcall = int(maxcall)
+
+            # architecture parameters
+            self.n_hidden_score = n_hidden_score
+            self.n_hidden_fisher = n_hidden_fisher
+            self.n_hidden_normflow = n_hidden_normflow
+            self.activation_normflow = activation_normflow
+            self.activation_score = activation_score
+            self.activation_fisher = activation_fisher
+
+            # optimizer
+            self.optimizer = optimizer
+            
+            # prior
+            self.priormu = priormu
+            self.priorCinv = priorCinv
+            self.theta_fid = theta_fid
+
+        # architectures
+        self.architecture_score = [n_inputs] + n_hidden_score + [n_parameters]
+        self.architecture_fisher = [n_inputs] + n_hidden_fisher + [int(n_parameters * (n_parameters + 1)) // 2]
+        self.architecture_normflow = [n_parameters] + n_hidden_normflow + [n_parameters]
+        self.n_layers_score = len(self.architecture_score) - 1
+        self.n_layers_fisher = len(self.architecture_fisher) - 1
+        self.n_layers_normflow = len(self.architecture_normflow) - 1
+        self.activation_score = activation_score + [tf.identity]
+        self.activation_fisher = activation_fisher + [tf.identity]
+        self.activation_normflow = activation_normflow + [tf.identity]
+        
+        # score model
+        self.model_score = tfk.Sequential([tfk.layers.Dense(self.architecture_score[i+1], activation=self.activation_score[i]) for i in range(self.n_layers_score)])
+        _ = self.model_score(tf.ones((1, 1, n_inputs)))
+        
+        # fisher model
+        self.model_fisher = tfk.Sequential([tfk.layers.Dense(self.architecture_fisher[i+1], activation=self.activation_fisher[i]) for i in range(self.n_layers_fisher)])
+        _ = self.model_fisher(tf.ones((1, 1, n_inputs)))
+
+        # normflow model
+        self.normflow = tfd.TransformedDistribution(
+                                distribution=tfd.Sample(
+                                    tfd.Normal(loc=0., scale=1.), sample_shape=[n_parameters]),
+                                bijector=tfb.MaskedAutoregressiveFlow(
+                                    shift_and_log_scale_fn=tfb.AutoregressiveNetwork(
+                                        params=n_parameters, hidden_units=n_hidden_normflow)))
 
         # restore trainable variables?
         if restore:
@@ -349,8 +679,10 @@ class FishnetTwin(tf.Module):
         
         # construct MLE
         mle = self.theta_fid + tf.einsum('ijk,ik->ij', tf.linalg.inv(F), t)
+
+        #mle_flow = self.normflow(mle)
     
-        return mle, F
+        return mle, F #, mle_flow
     
     # automatically break up the calculation if massive batches are called (to avoid memory issues)
     def compute_mle_(self, inputs, score_mask, fisher_mask):
@@ -368,34 +700,52 @@ class FishnetTwin(tf.Module):
             # compute the MLE and fisher over batches
             mle = np.zeros((inputs.shape[0], self.n_parameters))
             F = np.zeros((inputs.shape[0], self.n_parameters, self.n_parameters))
+            #mle_flow = np.zeros((inputs.shape[0], self.n_parameters))
             for i in trange(len(idx)):
                 mle_, F_ = self.compute_mle(inputs.numpy()[idx[i],...], score_mask.numpy()[idx[i],...], fisher_mask.numpy()[idx[i],...] )
                 mle[idx[i],:] = mle_.numpy()
                 F[idx[i],...] = F_.numpy()
+                #mle_flow[idx[i],:] = mle_flow_.numpy()
             mle = tf.convert_to_tensor(mle)
             F = tf.convert_to_tensor(F)
+            #mle_flow = tf.convert_to_tensor(mle_flow)
         else:
         
             # compute MLE and fisher
             mle, F = self.compute_mle(inputs, score_mask, fisher_mask)
     
-        return mle, F  
+        return mle, F
+
+    # negative log like function 
+    @tf.function
+    def normflow_loglike(self, data):
+        return -tf.reduce_mean(self.normflow.log_prob(data))
 
     # KL divergence loss
     @tf.function
     def kl_loss(self, inputs, parameters, score_mask, fisher_mask):
         
         mle, F = self.compute_mle(inputs, score_mask, fisher_mask)
+
+        # add residual and fisher as the normalising flow inputs
+        self.normflow._distribution = tfd.Sample(
+                        tfd.MultivariateNormalFullCovariance(loc=0., 
+                        covariance_matrix=tf.linalg.inv(F)), sample_shape=[])
+        
+        res = (parameters - mle) #self.normflow.bijector((parameters - mle))
+
+        normflow_loss = self.normflow_loglike(res)
     
-        return -tf.reduce_mean(-0.5 * tf.einsum('ij,ij->i', (parameters - mle), tf.einsum('ijk, ik -> ij', F, (parameters - mle))) + 0.5*tf.linalg.logdet(F))
+        return -tf.reduce_mean(-0.5 * tf.einsum('ij,ij->i', res, tf.einsum('ijk, ik -> ij', F, res)) + 0.5*tf.linalg.logdet(F)) + normflow_loss
 
     # mse loss
     @tf.function
     def mse_loss(self, inputs, parameters, score_mask, fisher_mask):
 
-        mle, F = self.compute_mle(inputs, score_mask, fisher_mask)
+        mle, F, mle_flow = self.compute_mle(inputs, score_mask, fisher_mask)
+        #normflow_loss = self.normflow_loglike(mle)
 
-        return tf.reduce_sum(tf.reduce_mean(tf.square(tf.subtract(mle, parameters)), axis=0))
+        return tf.reduce_sum(tf.reduce_mean(tf.square(tf.subtract(mle_flow, parameters)), axis=0))
 
     # basic loss and gradients function
     @tf.function
