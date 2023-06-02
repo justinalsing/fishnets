@@ -695,7 +695,7 @@ class FishnetTwinParametric(tf.Module):
     def construct_fisher_matrix(self, outputs):
         
         Q = tfp.math.fill_triangular(outputs)
-        L = Q - tf.linalg.diag(tf.linalg.diag_part(Q) + tf.math.softplus(tf.linalg.diag_part(Q)))
+        L = Q - tf.linalg.diag(tf.linalg.diag_part(Q) - tf.math.softplus(tf.linalg.diag_part(Q)))
         return tf.einsum('...ij,...jk->...ik', L, tf.transpose(L, perm=[0, 1, 3, 2]))
     
     # construct the MLE
